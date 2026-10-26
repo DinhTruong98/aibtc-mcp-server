@@ -279,7 +279,7 @@ export function registerAllTools(server: McpServer, selection: ToolSelection): v
   inGroup("earn", registerEarningTools);
 
   // TaskMarket (onchain agent work marketplace on Base — read-only discovery + gated create)
-  registerTaskmarketTools(server);
+  inGroup("earn", registerTaskmarketTools);
 
   restoreRegisterTool();
 }

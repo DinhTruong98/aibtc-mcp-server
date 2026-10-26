@@ -25,7 +25,7 @@
  * - No private keys, seeds, tokens, or cookies are ever requested, stored, or logged here.
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { z } from "zod";
@@ -66,7 +66,7 @@ export function registerTaskmarketTools(server: McpServer): void {
         "Public and anonymous — no wallet or payment needed. Returns tasks with ID, reward (USDC), " +
         "status, submission count, deadline, and a short description so you can pick work to delegate. " +
         "Never spends anything.",
-      inputSchema: {
+      inputSchema: z.object({
         status: z.string().default("open").describe("Filter by status (default: open)"),
         phase: z.string().optional().describe("Filter by lifecycle phase (active, in_review, awaiting_settlement, resolved)"),
         mode: z.string().optional().describe("Filter by task mode (bounty, claim, pitch, benchmark, auction)"),
@@ -74,7 +74,7 @@ export function registerTaskmarketTools(server: McpServer): void {
         rewardMin: z.string().optional().describe("Minimum reward in human USDC (e.g. 0.5)"),
         rewardMax: z.string().optional().describe("Maximum reward in human USDC (e.g. 50)"),
         limit: z.number().int().min(1).max(50).default(20).describe("Max results (1-50)"),
-      },
+      }),
     },
     async (args) => {
       try {
@@ -119,9 +119,9 @@ export function registerTaskmarketTools(server: McpServer): void {
         "Returns description, reward, deadline, escrow tx, submission count, phase, and status. " +
         "Use this after creating or delegating a task to check whether it is open, in review, " +
         "awaiting settlement, or resolved. Never spends anything.",
-      inputSchema: {
+      inputSchema: z.object({
         taskId: TASK_ID_SCHEMA,
-      },
+      }),
     },
     async ({ taskId }) => {
       try {
@@ -157,9 +157,9 @@ export function registerTaskmarketTools(server: McpServer): void {
         "Returns each submission's worker address, submission time, deliverable file name, and " +
         "hash. This tool NEVER accepts or rejects work — it only surfaces submissions so a human " +
         "requester can review the deliverable before authorizing any payment.",
-      inputSchema: {
+      inputSchema: z.object({
         taskId: TASK_ID_SCHEMA,
-      },
+      }),
     },
     async ({ taskId }) => {
       try {
@@ -197,10 +197,10 @@ export function registerTaskmarketTools(server: McpServer): void {
         "Public TaskMarket statistics for an agent address or agent ID: completed tasks, rating, " +
         "total stars. Anonymous read. Use to gauge whether a worker or requester is reputable " +
         "before delegating work. Never spends anything.",
-      inputSchema: {
+      inputSchema: z.object({
         address: z.string().optional().describe("Wallet address to look up stats for"),
         agentId: z.string().optional().describe("Agent ID to look up stats for (alternative to address)"),
-      },
+      }),
     },
     async (args) => {
       try {
@@ -233,7 +233,7 @@ export function registerTaskmarketTools(server: McpServer): void {
         "If the confirmation token is missing/wrong or the reward exceeds max-spend, this REFUSES " +
         "and returns the reason — no funds are ever moved. On success it returns the plan plus the " +
         "exact first-party CLI command that `taskmarket_create` would run.",
-      inputSchema: {
+      inputSchema: z.object({
         description: z.string().min(20).describe("Exact task description / deliverables the worker must produce (>=20 chars)"),
         rewardUsdc: z.string().describe("Reward in human USDC (e.g. '5' or '0.50')"),
         durationHours: z.number().positive().describe("Task duration / deadline in hours from now"),
@@ -241,7 +241,7 @@ export function registerTaskmarketTools(server: McpServer): void {
         submissionVisibility: z.enum(["public", "reveal_all", "winner_only", "never"]).default("public").describe("Who can see submissions"),
         confirm: z.string().describe("Explicit operator authorization. Must equal APPROVE exactly."),
         maxSpendUsdc: z.string().describe("Hard maximum spend in human USDC (reward must be <= this)"),
-      },
+      }),
     },
     async (args) => {
       try {
@@ -296,7 +296,7 @@ export function registerTaskmarketTools(server: McpServer): void {
         "if the reward exceeds maxSpend, or if any field is invalid — no money moves in those cases. " +
         "If the create fails mid-flight, it is NOT retried blindly; the error is returned and you " +
         "should check `taskmarket inbox` before attempting anything again.",
-      inputSchema: {
+      inputSchema: z.object({
         description: z.string().min(20).describe("Exact task description / deliverables (>=20 chars)"),
         rewardUsdc: z.string().describe("Reward in human USDC (escrowed from your wallet)"),
         durationHours: z.number().positive().describe("Task duration / deadline in hours from now"),
@@ -304,7 +304,7 @@ export function registerTaskmarketTools(server: McpServer): void {
         submissionVisibility: z.enum(["public", "reveal_all", "winner_only", "never"]).default("public").describe("Who can see submissions"),
         confirm: z.string().describe("Explicit operator authorization. Must equal APPROVE exactly."),
         maxSpendUsdc: z.string().describe("Hard maximum spend cap in human USDC (reward must be <= this)"),
-      },
+      }),
     },
     async (args) => {
       try {
