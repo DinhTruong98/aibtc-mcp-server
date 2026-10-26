@@ -693,10 +693,9 @@ that leaves the reveal output under dust.
 
 [TaskMarket](https://taskmarket.dev) is an onchain agent work marketplace on
 Base: requesters escrow USDC, workers submit deliverables, and the requester
-reviews and accepts a winner. These tools let an agent browse that market and,
-with explicit operator authorization, post work to it.
+reviews and accepts a winner. These tools let an agent browse that market.
 
-**Read-only tools (public API, anonymous, no wallet, no spend):**
+**Tools (public API, anonymous, no wallet, no spend):**
 - `taskmarket_search` - List/search open tasks. Filters: `status` (default
   `open`), `phase` (`active`, `in_review`, `awaiting_settlement`, `resolved`),
   `mode` (`bounty`, `claim`, `pitch`, `benchmark`, `auction`), `tags`,
@@ -708,45 +707,10 @@ with explicit operator authorization, post work to it.
   (`https://taskmarket.dev/task/<id>`), and description.
 - `taskmarket_submissions` - List a task's submissions for **human review**:
   worker address, agent ID, submission time, deliverable file names, and
-  hashes. This tool **never auto-accepts or auto-rejects** work — it only
-  surfaces submissions so a human requester can review the deliverable before
-  authorizing any payment.
+  hashes. It never accepts or rejects work.
 - `taskmarket_stats` - Public agent/market statistics (completed tasks,
   rating, total stars) for an address or agent ID. Use to sanity-check a
   worker before delegating work.
-
-**Gated write tool (escrows real USDC — requires explicit authorization):**
-- `taskmarket_preview_create` - Show the **exact** task plan (description,
-  reward, deadline, deliverables, Base network `eip155:8453`, max spend) and
-  prove the confirmation gate works **before any money can move**. Pass the
-  task details plus `confirm="APPROVE"` and `maxSpendUsdc`. Missing/wrong
-  confirmation or a reward over the cap **refuses** and returns the reason —
-  no funds are ever moved. On success it returns the plan plus the exact
-  first-party CLI command that `taskmarket_create` would run.
-- `taskmarket_create` - Create and fund a task through the first-party
-  TaskMarket CLI (which escrows USDC on Base via x402). Requires the **same**
-  confirmation token (`confirm="APPROVE"`) and a `maxSpendUsdc` cap `>=`
-  reward; otherwise it refuses with no money moved. Returns the task ID, link,
-  and live status.
-
-**Security invariants:**
-- Create is disabled unless the operator sets `TASKMARKET_MAX_SPEND_USDC` in
-  the server environment, and the reward must be `<=` it. The model cannot
-  raise this ceiling.
-- `confirm="APPROVE"` and `maxSpendUsdc` are tool arguments the model can
-  fill itself, so they are a second per-call check, not the gate.
-- The `taskmarket` CLI (`@lucid-agents/taskmarket`, installed separately)
-  signs with its own EVM wallet. USDC on Base has no spend-limiter ledger, so
-  `TASKMARKET_MAX_SPEND_USDC` is the only cap.
-- The CLI gets an allowlisted environment (`PATH`, `HOME`, temp dirs,
-  `TASKMARKET_API_URL`): no `CLIENT_MNEMONIC` or API keys.
-- The network is pinned with `--network base` (`eip155:8453`), USDC
-  `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
-- No blind retry of unknown-settlement payments: if the CLI fails or returns
-  no task ID, the error is surfaced and the caller is told to check
-  `taskmarket inbox` — never silently re-submitted.
-- No private keys, seeds, tokens, or cookies are ever requested, stored, or
-  logged. Read-only tools are fully anonymous.
 
 ### Endpoint Categories
 

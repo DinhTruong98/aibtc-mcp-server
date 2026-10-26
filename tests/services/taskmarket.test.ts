@@ -1,29 +1,20 @@
 /**
- * Hermetic unit tests for the TaskMarket service: the read-only API client and
- * the gated create-plan logic. No network access, no wallet, no real spend.
+ * Hermetic unit tests for the TaskMarket service's read-only API client.
+ * No network access, no wallet, no real spend.
  */
 
-import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   baseUnitsToUsdc,
   usdcToBaseUnits,
-  parseMaxSpend,
-  prepareCreatePlan,
   listTasks,
   getTask,
   listSubmissions,
   getMarketStats,
-  TASKMARKET_NETWORK,
-  TASKMARKET_USDC_ASSET,
 } from "../../src/services/taskmarket.service.js";
-
-beforeEach(() => {
-  vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "5");
-});
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  vi.unstubAllEnvs();
 });
 
 describe("usdc unit conversion", () => {
@@ -44,134 +35,6 @@ describe("usdc unit conversion", () => {
   it("rejects malformed USDC amounts", () => {
     expect(() => usdcToBaseUnits("abc")).toThrow();
     expect(() => usdcToBaseUnits("1.0000001")).toThrow();
-  });
-
-  it("parses max-spend caps", () => {
-    expect(parseMaxSpend("5")).toBe(5000000n);
-    expect(parseMaxSpend("0.50")).toBe(500000n);
-    expect(parseMaxSpend("2000000", true)).toBe(2000000n);
-  });
-});
-
-describe("prepareCreatePlan — the create gate", () => {
-  const base = {
-    description: "Write a short research brief on Base USDC adoption for AI agents.",
-    rewardUsdc: "2",
-    durationHours: 24,
-    tags: ["research"],
-    submissionVisibility: "public" as const,
-  };
-
-  it("grants a valid plan and pins Base network + USDC asset", () => {
-    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "5" });
-    expect(result.granted).toBe(true);
-    expect(result.plan).toBeDefined();
-    expect(result.plan!.network).toBe(TASKMARKET_NETWORK);
-    expect(result.plan!.asset).toBe(TASKMARKET_USDC_ASSET);
-    expect(result.plan!.rewardBaseUnits).toBe("2000000");
-    expect(result.plan!.rewardUsdc).toBe("2");
-    expect(result.plan!.maxSpendUsdc).toBe("5");
-    expect(result.plan!.durationHours).toBe(24);
-    expect(result.plan!.tags).toEqual(["research"]);
-    expect(new Date(result.plan!.deadlineIso).getTime()).toBeGreaterThan(Date.now());
-  });
-
-  it("REFUSES without the explicit confirmation token (no money moves)", () => {
-    const result = prepareCreatePlan(base, { confirm: "", maxSpendUsdc: "5" });
-    expect(result.granted).toBe(false);
-    expect(result.reason).toContain("APPROVE");
-    expect(result.reason).toContain("No funds were moved");
-  });
-
-  it("REFUSES a wrong confirmation token", () => {
-    const result = prepareCreatePlan(base, { confirm: "yes", maxSpendUsdc: "5" });
-    expect(result.granted).toBe(false);
-  });
-
-  it("REFUSES when reward exceeds max-spend cap", () => {
-    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "1" });
-    expect(result.granted).toBe(false);
-    expect(result.reason).toContain("exceeds max-spend");
-    expect(result.reason).toContain("No funds were moved");
-  });
-
-  it("REFUSES when the operator has not set TASKMARKET_MAX_SPEND_USDC", () => {
-    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "");
-    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "5" });
-    expect(result.granted).toBe(false);
-    expect(result.reason).toContain("TASKMARKET_MAX_SPEND_USDC");
-    expect(result.reason).toContain("No funds were moved");
-  });
-
-  it("REFUSES when TASKMARKET_MAX_SPEND_USDC is 0", () => {
-    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "0");
-    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "5" });
-    expect(result.granted).toBe(false);
-    expect(result.reason).toContain("disabled");
-  });
-
-  it("REFUSES a reward over the operator ceiling even when the caller's cap allows it", () => {
-    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "1");
-    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "100" });
-    expect(result.granted).toBe(false);
-    expect(result.reason).toContain("operator ceiling");
-  });
-
-  it("REFUSES a zero reward", () => {
-    const result = prepareCreatePlan(
-      { ...base, rewardUsdc: "0" },
-      { confirm: "APPROVE", maxSpendUsdc: "5" }
-    );
-    expect(result.granted).toBe(false);
-    expect(result.reason).toContain("greater than 0");
-  });
-
-  it("REFUSES a too-short description (deliverables must be explicit)", () => {
-    const result = prepareCreatePlan(
-      { ...base, description: "short" },
-      { confirm: "APPROVE", maxSpendUsdc: "5" }
-    );
-    expect(result.granted).toBe(false);
-    expect(result.reason).toContain("at least 20 characters");
-  });
-
-  it("REFUSES an invalid reward string", () => {
-    const result = prepareCreatePlan(
-      { ...base, rewardUsdc: "not-a-number" },
-      { confirm: "APPROVE", maxSpendUsdc: "5" }
-    );
-    expect(result.granted).toBe(false);
-  });
-
-  it("REFUSES an invalid max-spend", () => {
-    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "oops" });
-    expect(result.granted).toBe(false);
-  });
-
-  it("REFUSES a non-positive duration", () => {
-    const result = prepareCreatePlan(
-      { ...base, durationHours: 0 },
-      { confirm: "APPROVE", maxSpendUsdc: "5" }
-    );
-    expect(result.granted).toBe(false);
-  });
-
-  it("REFUSES an invalid submission visibility", () => {
-    const result = prepareCreatePlan(
-      { ...base, submissionVisibility: "secret" as "public" },
-      { confirm: "APPROVE", maxSpendUsdc: "5" }
-    );
-    expect(result.granted).toBe(false);
-  });
-
-  it("supports base-unit max-spend (for tool callers holding raw values)", () => {
-    const result = prepareCreatePlan(base, {
-      confirm: "APPROVE",
-      maxSpendUsdc: "5000000",
-      maxSpendBaseUnits: true,
-    });
-    expect(result.granted).toBe(true);
-    expect(result.plan!.maxSpendBaseUnits).toBe("5000000");
   });
 });
 

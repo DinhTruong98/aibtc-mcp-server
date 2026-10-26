@@ -1,19 +1,9 @@
 /**
  * Hermetic tool tests for the TaskMarket MCP tools. No network, no wallet, no
- * real spend. Mocks fetch for the read-only API and the first-party CLI for the
- * gated create path.
+ * real spend. Mocks fetch for the read-only API.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-// Mock the first-party CLI binary so the create path is hermetic.
-vi.mock("child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("child_process")>();
-  const mockExecFile = vi.fn();
-  return { ...actual, execFile: mockExecFile };
-});
-import { execFile } from "child_process";
-const mockExecFile = execFile as unknown as ReturnType<typeof vi.fn>;
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { registerTaskmarketTools } = await import(
   "../../src/tools/taskmarket.tools.js"
@@ -60,26 +50,19 @@ describe("taskmarket tools", () => {
   let server: ReturnType<typeof createTrackingServer>["server"];
   let tools: ReturnType<typeof createTrackingServer>["tools"];
 
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
   beforeEach(() => {
-    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "5");
-    mockExecFile.mockReset();
     const tracking = createTrackingServer();
     server = tracking.server;
     tools = tracking.tools;
     registerTaskmarketTools(server as never);
   });
 
-  it("registers all six taskmarket tools without throwing", () => {
+  it("registers the four read-only taskmarket tools without throwing", () => {
     expect(tools.has("taskmarket_search")).toBe(true);
     expect(tools.has("taskmarket_get")).toBe(true);
     expect(tools.has("taskmarket_submissions")).toBe(true);
     expect(tools.has("taskmarket_stats")).toBe(true);
-    expect(tools.has("taskmarket_preview_create")).toBe(true);
-    expect(tools.has("taskmarket_create")).toBe(true);
+    expect(tools.size).toBe(4);
   });
 
   it("taskmarket_search returns mapped tasks from the public API", async () => {
@@ -146,211 +129,13 @@ describe("taskmarket tools", () => {
     vi.unstubAllGlobals();
   });
 
-  it("taskmarket_preview_create REFUSES without the confirmation token", async () => {
-    const res = await tools.get("taskmarket_preview_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as { success: boolean; granted: boolean; reason: string };
-    expect(body.success).toBe(false);
-    expect(body.granted).toBe(false);
-    expect(body.reason).toContain("APPROVE");
-    expect(body.reason).toContain("No funds were moved");
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-
-  it("taskmarket_preview_create REFUSES when reward exceeds max-spend", async () => {
-    const res = await tools.get("taskmarket_preview_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "10",
-      durationHours: 24,
-      confirm: "APPROVE",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as { success: boolean; granted: boolean; reason: string };
-    expect(body.granted).toBe(false);
-    expect(body.reason).toContain("exceeds max-spend");
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-
-  it("taskmarket_preview_create shows the exact plan on approval", async () => {
-    const res = await tools.get("taskmarket_preview_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      tags: ["research"],
-      confirm: "APPROVE",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as {
-      success: boolean;
-      granted: boolean;
-      plan: { network: string; rewardUsdc: string; maxSpendUsdc: string; deadlineIso: string; tags: string[] };
-      cliCommand: string;
-    };
-    expect(body.success).toBe(true);
-    expect(body.granted).toBe(true);
-    expect(body.plan.network).toBe("eip155:8453");
-    expect(body.plan.rewardUsdc).toBe("2");
-    expect(body.plan.maxSpendUsdc).toBe("5");
-    expect(body.plan.tags).toEqual(["research"]);
-    expect(body.cliCommand).toContain("task create");
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-
-  it("taskmarket_create runs the CLI only after the gate passes and returns taskId + live status", async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, res: { stdout: string; stderr: string }) => void) => {
-        cb(null, {
-          stdout: JSON.stringify({ ok: true, data: { taskId: VALID_TASK_ID } }),
-          stderr: "",
-        });
-      }
-    );
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        jsonResponse({
-          id: VALID_TASK_ID,
-          status: "open",
-          phase: "active",
-          reward: "2000000",
-          expiryTime: "2026-08-20T00:00:00Z",
-          description: "task",
-        })
-      )
-    );
-    const res = await tools.get("taskmarket_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "APPROVE",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as { success: boolean; taskId: string; liveStatus: { status: string } };
-    expect(body.success).toBe(true);
-    expect(body.taskId).toBe(VALID_TASK_ID);
-    expect(body.liveStatus.status).toBe("open");
-    expect(mockExecFile).toHaveBeenCalledTimes(1);
-    const cliArgs = mockExecFile.mock.calls[0][1] as string[];
-    expect(cliArgs.slice(0, 4)).toEqual(["--network", "base", "task", "create"]);
-    vi.unstubAllGlobals();
-  });
-
-  it("taskmarket_create passes the CLI an allowlisted env without server secrets", async () => {
-    vi.stubEnv("CLIENT_MNEMONIC", "abandon abandon abandon");
-    vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
-    vi.stubEnv("TASKMARKET_NETWORK", "base-sepolia");
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, res: { stdout: string; stderr: string }) => void) => {
-        cb(null, { stdout: JSON.stringify({ ok: true }), stderr: "" });
-      }
-    );
-    await tools.get("taskmarket_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "APPROVE",
-      maxSpendUsdc: "5",
-    });
-    const opts = mockExecFile.mock.calls[0][2] as { env: Record<string, string | undefined> };
-    expect(opts.env.CLIENT_MNEMONIC).toBeUndefined();
-    expect(opts.env.OPENROUTER_API_KEY).toBeUndefined();
-    expect(opts.env.TASKMARKET_MAX_SPEND_USDC).toBeUndefined();
-    expect(opts.env.TASKMARKET_NETWORK).toBeUndefined();
-    expect(opts.env.PATH).toBe(process.env.PATH);
-  });
-
-  it("taskmarket_create REFUSES (no CLI call) when the operator ceiling is unset, even with confirm + cap", async () => {
-    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "");
-    const res = await tools.get("taskmarket_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "APPROVE",
-      maxSpendUsdc: "2",
-    });
-    const body = parseResult(res) as { granted: boolean; reason: string };
+  it("taskmarket_stats refuses without an address or agentId (no API call)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await tools.get("taskmarket_stats")!.handler({});
     expect(res.isError).toBe(true);
-    expect(body.granted).toBe(false);
-    expect(body.reason).toContain("TASKMARKET_MAX_SPEND_USDC");
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-
-  it("taskmarket_create returns the taskId and the status error when the post-create read fails", async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, res: { stdout: string; stderr: string }) => void) => {
-        cb(null, { stdout: JSON.stringify({ ok: true, data: { taskId: VALID_TASK_ID } }), stderr: "" });
-      }
-    );
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "boom" }, { status: 503 })));
-    const res = await tools.get("taskmarket_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "APPROVE",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as { taskId: string; liveStatus: unknown; liveStatusError: string };
-    expect(body.taskId).toBe(VALID_TASK_ID);
-    expect(body.liveStatus).toBeNull();
-    expect(body.liveStatusError).toContain("503");
+    expect(res.content[0].text).toMatch(/address or an agentId/);
+    expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
-  });
-
-  it("taskmarket_create REFUSES (no CLI call) without explicit confirmation", async () => {
-    const res = await tools.get("taskmarket_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "nope",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as { success: boolean; granted: boolean; reason: string };
-    expect(body.success).toBe(false);
-    expect(body.granted).toBe(false);
-    expect(body.reason).toContain("APPROVE");
-    expect(mockExecFile).not.toHaveBeenCalled();
-  });
-
-  it("taskmarket_create does NOT blindly retry when the CLI fails with unknown settlement", async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, res: { stdout: string; stderr: string }) => void) => {
-        cb(new Error("settlement timed out"), { stdout: "", stderr: "" });
-      }
-    );
-    const res = await tools.get("taskmarket_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "APPROVE",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as { success: boolean; note: string };
-    expect(body.success).toBe(false);
-    expect(body.note).toContain("NOT blindly retried");
-    expect(mockExecFile).toHaveBeenCalledTimes(1);
-  });
-
-  it("taskmarket_create does NOT blindly retry when the CLI returns no task ID", async () => {
-    mockExecFile.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, res: { stdout: string; stderr: string }) => void) => {
-        cb(null, { stdout: JSON.stringify({ ok: true }), stderr: "" });
-      }
-    );
-    const res = await tools.get("taskmarket_create")!.handler({
-      description: "Write a short research brief on Base USDC adoption for AI agents.",
-      rewardUsdc: "2",
-      durationHours: 24,
-      confirm: "APPROVE",
-      maxSpendUsdc: "5",
-    });
-    const body = parseResult(res) as { success: boolean; note: string };
-    expect(body.success).toBe(false);
-    expect(body.note).toContain("NOT retried");
-    expect(mockExecFile).toHaveBeenCalledTimes(1);
   });
 });

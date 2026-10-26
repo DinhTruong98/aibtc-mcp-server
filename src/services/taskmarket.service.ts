@@ -1,68 +1,17 @@
 /**
- * TaskMarket service — read-only discovery + gated task creation.
+ * TaskMarket service — read-only discovery.
  *
  * TaskMarket (https://taskmarket.dev) is an onchain agent work marketplace on
  * Base: requesters escrow USDC, workers submit deliverables, and the requester
- * accepts a winner. This service exposes the marketplace through the public
- * API (read-only tools: search, get, list-submissions, market-stats) and a
- * single gated write path (create-task).
- *
- * Creating a task escrows real USDC on Base through the first-party
- * `taskmarket` CLI, which signs with its own EVM wallet (not this server's).
- * It is disabled unless the operator sets TASKMARKET_MAX_SPEND_USDC, and each
- * call also needs confirm="APPROVE" and a maxSpendUsdc cap. USDC on Base has
- * no ledger in the spend limiter, so the env ceiling is the only cap.
- *
- * SECURITY INVARIANT: this file never holds a private key, seed phrase, token,
- * or cookie. Read-only endpoints are anonymous. The create path relies on the
- * first-party TaskMarket tooling (the `taskmarket` CLI or a configured wallet)
- * to sign and settle; this module only validates the request, shows the exact
- * plan, and enforces the spending cap before any money can move.
+ * accepts a winner. This service reads the public, anonymous API (search, get,
+ * list-submissions, market-stats). It never signs or spends.
  */
 
 const TASKMARKET_API_URL =
   process.env.TASKMARKET_API_URL || "https://api.taskmarket.dev";
 
-/** Base chain (TaskMarket escrows USDC on Base). CAIP-2: eip155:8453. */
-export const TASKMARKET_NETWORK = "eip155:8453";
-
-/** Base USDC contract (merchant-of-record asset for TaskMarket tasks). */
-export const TASKMARKET_USDC_ASSET =
-  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-
 /** Bound every read so a hung TaskMarket API cannot hold a tool call open. */
 const READ_TIMEOUT_MS = 15_000;
-
-/**
- * Operator spend ceiling for taskmarket_create, in base units, read from
- * TASKMARKET_MAX_SPEND_USDC. Returns null when unset or 0, which disables
- * create. It comes from the server environment, not from tool arguments, so
- * the calling model cannot raise it.
- */
-export function readOperatorMaxSpend(): bigint | null {
-  const raw = process.env.TASKMARKET_MAX_SPEND_USDC?.trim();
-  if (!raw) return null;
-  const cap = BigInt(usdcToBaseUnits(raw));
-  return cap > 0n ? cap : null;
-}
-
-/** Refusal reason when the operator ceiling blocks this reward, else null. */
-export function operatorCapRefusal(rewardBaseUnits: bigint): string | null {
-  const cap = readOperatorMaxSpend();
-  if (cap === null) {
-    return (
-      "Create refused: TaskMarket create is disabled. The operator must set " +
-      "TASKMARKET_MAX_SPEND_USDC in the server environment to enable it. No funds were moved."
-    );
-  }
-  if (rewardBaseUnits > cap) {
-    return (
-      `Create refused: reward ${baseUnitsToUsdc(rewardBaseUnits.toString())} USDC exceeds the operator ` +
-      `ceiling TASKMARKET_MAX_SPEND_USDC=${baseUnitsToUsdc(cap.toString())}. No funds were moved.`
-    );
-  }
-  return null;
-}
 
 export interface TaskmarketTask {
   id: string;
@@ -124,19 +73,6 @@ export function usdcToBaseUnits(amount: string): string {
   const fracPadded = frac.padEnd(6, "0");
   const fracInt = fracPadded ? BigInt(fracPadded) : 0n;
   return (wholeInt * 1000000n + fracInt).toString();
-}
-
-/**
- * Parse a "max spend" cap string into base units, throwing on invalid input.
- * Accepts human USDC (e.g. "5", "0.50") or an integer base-unit string when
- * the `baseUnits` flag is set.
- */
-export function parseMaxSpend(raw: string, baseUnits = false): bigint {
-  const value = baseUnits ? raw : usdcToBaseUnits(raw);
-  if (!/^\d+$/.test(value)) {
-    throw new Error(`Invalid max spend: "${raw}"`);
-  }
-  return BigInt(value);
 }
 
 async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -231,136 +167,4 @@ export async function getMarketStats(options: {
   if (options.agentId) params.set("agentId", options.agentId);
   const query = params.toString();
   return apiGet<TaskmarketStats>(`/api/agents/stats${query ? `?${query}` : ""}`, options.signal);
-}
-
-export interface CreateTaskRequest {
-  description: string;
-  rewardUsdc: string;
-  durationHours: number;
-  tags?: string[];
-  submissionVisibility?: "public" | "reveal_all" | "winner_only" | "never";
-}
-
-export interface GatedCreateResult {
-  granted: boolean;
-  reason?: string;
-  plan?: {
-    network: string;
-    asset: string;
-    description: string;
-    rewardUsdc: string;
-    rewardBaseUnits: string;
-    durationHours: number;
-    deadlineIso: string;
-    tags: string[];
-    maxSpendUsdc: string;
-    maxSpendBaseUnits: string;
-    submissionVisibility: string;
-  };
-}
-
-/**
- * Build and validate the exact create plan WITHOUT touching money.
- *
- * Returns `{ granted: false, reason }` (and never attempts payment) when:
- *  - the confirmation token is missing or does not match the required literal;
- *  - the reward exceeds the caller's max-spend cap;
- *  - any field is malformed.
- *
- *  - the operator ceiling TASKMARKET_MAX_SPEND_USDC is unset or below the reward.
- *
- * `confirm` and `maxSpendUsdc` are tool arguments, so the calling model can
- * supply them itself; they are a per-call check only. The ceiling the model
- * cannot raise is the environment variable (see operatorCapRefusal).
- */
-export function prepareCreatePlan(
-  request: CreateTaskRequest,
-  opts: { confirm: string; maxSpendUsdc: string; maxSpendBaseUnits?: boolean }
-): GatedCreateResult {
-  const requiredConfirm = "APPROVE";
-  if (opts.confirm.trim() !== requiredConfirm) {
-    return {
-      granted: false,
-      reason: `Create refused: you must pass confirm="${requiredConfirm}" to explicitly authorize this task. No funds were moved.`,
-    };
-  }
-
-  const description = request.description.trim();
-  if (!description) {
-    return { granted: false, reason: "Create refused: description is required." };
-  }
-  if (description.length < 20) {
-    return {
-      granted: false,
-      reason: "Create refused: description must be at least 20 characters (show the exact task the worker will deliver).",
-    };
-  }
-
-  let rewardBaseUnits: bigint;
-  try {
-    rewardBaseUnits = BigInt(usdcToBaseUnits(request.rewardUsdc));
-  } catch {
-    return {
-      granted: false,
-      reason: `Create refused: invalid reward "${request.rewardUsdc}" (human USDC, up to 6 decimals).`,
-    };
-  }
-  if (rewardBaseUnits <= 0n) {
-    return { granted: false, reason: "Create refused: reward must be greater than 0 USDC." };
-  }
-
-  let maxSpend: bigint;
-  try {
-    maxSpend = parseMaxSpend(opts.maxSpendUsdc, opts.maxSpendBaseUnits);
-  } catch {
-    return {
-      granted: false,
-      reason: `Create refused: invalid max-spend "${opts.maxSpendUsdc}".`,
-    };
-  }
-  if (rewardBaseUnits > maxSpend) {
-    return {
-      granted: false,
-      reason:
-        `Create refused: reward ${request.rewardUsdc} USDC exceeds max-spend ` +
-        `${opts.maxSpendUsdc} USDC. Raise the cap and retry with a fresh confirm token. No funds were moved.`,
-    };
-  }
-
-  const durationHours = Number(request.durationHours);
-  if (!Number.isFinite(durationHours) || durationHours <= 0) {
-    return { granted: false, reason: "Create refused: durationHours must be a positive number." };
-  }
-
-  const operatorRefusal = operatorCapRefusal(rewardBaseUnits);
-  if (operatorRefusal) {
-    return { granted: false, reason: operatorRefusal };
-  }
-
-  const tags = (request.tags ?? []).map((t) => t.trim()).filter(Boolean);
-  const submissionVisibility = request.submissionVisibility ?? "public";
-  const validVisibilities = ["public", "reveal_all", "winner_only", "never"];
-  if (!validVisibilities.includes(submissionVisibility)) {
-    return {
-      granted: false,
-      reason: `Create refused: submissionVisibility must be one of ${validVisibilities.join(", ")}.`,
-    };
-  }
-
-  return {
-    granted: true,
-    plan: {
-      network: TASKMARKET_NETWORK,
-      asset: TASKMARKET_USDC_ASSET,
-      description,
-      rewardUsdc: request.rewardUsdc,
-      rewardBaseUnits: rewardBaseUnits.toString(),
-      durationHours,
-      deadlineIso: new Date(Date.now() + durationHours * 3600_000).toISOString(),
-      tags,
-      maxSpendUsdc: opts.maxSpendUsdc,
-      maxSpendBaseUnits: maxSpend.toString(),
-      submissionVisibility,
-    },
-  };
 }

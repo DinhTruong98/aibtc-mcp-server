@@ -242,30 +242,17 @@ unlocked wallet on the gateway's network. Every tool takes an optional `gateway`
 arg (defaults to `https://inference.aibtc.com`; use `http://localhost:8787` for
 local dev).
 
-### TaskMarket (delegate onchain work on Base)
+### TaskMarket (onchain work marketplace on Base)
 
-Browse and post work on the [TaskMarket](https://taskmarket.dev) agent work
-marketplace (USDC escrow on Base). Use it when a request is better delegated to
-a competitive worker market instead of burning inference locally.
+Browse the [TaskMarket](https://taskmarket.dev) agent work marketplace (USDC
+escrow on Base). The tools are public and anonymous: no wallet, no spend.
 
 | Tool | Description | Signed |
 |------|-------------|:------:|
 | `taskmarket_search` | List/search open tasks (filters, reward range) | — |
 | `taskmarket_get` | Full task detail + live status + link | — |
-| `taskmarket_submissions` | List submissions for HUMAN review (never auto-accepts) | — |
+| `taskmarket_submissions` | List a task's submissions | — |
 | `taskmarket_stats` | Public agent/market stats (reputation check) | — |
-| `taskmarket_preview_create` | Show the exact create plan + prove the confirm gate | — |
-| `taskmarket_create` | Create + fund via first-party TaskMarket CLI (Base/USDC x402) | requires `confirm="APPROVE"` + `maxSpendUsdc` |
-
-Read tools are public and anonymous — no wallet, no spend. Creating a task
-escrows real USDC: call `taskmarket_preview_create` first to show the operator
-the exact description, reward, deadline, deliverables, Base network, and max
-spend, then `taskmarket_create` with the same details plus `confirm="APPROVE"`
-and a `maxSpendUsdc` cap `>=` reward. It refuses otherwise with "No funds were
-moved", pins the network to Base (`eip155:8453`), and never blindly retries
-unknown-settlement payments. Create is off unless the operator sets
-`TASKMARKET_MAX_SPEND_USDC` in the server env, and it needs the separately
-installed `taskmarket` CLI with its own funded Base wallet.
 
 See: [references/taskmarket.md](references/taskmarket.md)
 
