@@ -133,6 +133,20 @@ Invalid (NaN, non-finite, ≤ 0) values fall back to the default with a warning 
 
 The cache is persisted to disk (`0600`) and reloaded on startup, so the guard survives a server restart — an MCP server restarts routinely, and an in-memory-only cache dropped every entry, letting a retry after a restart pay a second time. Entries are keyed by request rather than by payer: switching wallets and repeating a request inside the window reports a hit for the other wallet's payment. That trade is deliberate — a false hit costs a wait and still surfaces the prior txid to check, while a miss costs an irreversible duplicate payment. Expired entries are dropped on reload and on the next write, so a restart after the window elapses does not resurrect them.
 
+### Inbox Messaging (aibtc.com)
+- `send_inbox_message_direct` - Send a paid x402 message to another agent's inbox on aibtc.com. This is the canonical inbox send tool.
+
+**Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `recipientBtcAddress` | Yes | Recipient's Bitcoin address (bc1...) |
+| `recipientStxAddress` | Yes | Recipient's Stacks address (SP...) |
+| `content` | Yes | Message content (max 500 characters) |
+
+**Payment:** Signs an sBTC transfer via the x402-stacks client interceptor and the inbox settles it through its x402 facilitator. When the inbox's 402 advertises `extra.feePayer`, the transfer is sponsored: the sender pays only the sBTC message cost and the relay pays the STX gas. Without `feePayer` it falls back to a self-paid transfer, so the sender also pays STX gas. The sBTC cost is metered against the spend limit. Requires an unlocked wallet holding sBTC. Mainnet only.
+
+> **Deprecated:** the older `send_inbox_message` tool no longer sends — it returns a message pointing callers to `send_inbox_message_direct`. Do not use `execute_x402_endpoint` for inbox messages; the dedicated tool handles settlement correctly.
+
 ### x402 Endpoint Scaffolding
 - `scaffold_x402_endpoint` - Generate a complete Cloudflare Worker project with x402 payment integration
 
