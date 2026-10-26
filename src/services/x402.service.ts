@@ -5,6 +5,8 @@ import {
   uintCV,
   principalCV,
   noneCV,
+  someCV,
+  bufferCVFromString,
   Pc,
   PostConditionMode,
 } from "@stacks/transactions";
@@ -21,7 +23,7 @@ import { NETWORK, API_URL, getStacksNetwork, type Network } from "../config/netw
 import { getNetworkFromStacksChainId } from "../config/caip.js";
 import type { Account } from "../transactions/builder.js";
 import { getWalletManager } from "./wallet-manager.js";
-import { getSpendLimiter } from "./spend-limiter.js";
+import { getSpendLimiter, type SpendReservation } from "./spend-limiter.js";
 import { formatStx, formatSbtc } from "../utils/formatting.js";
 import { getSbtcService } from "./sbtc.service.js";
 import { getHiroApi } from "./hiro-api.js";
@@ -481,6 +483,8 @@ export interface PaymentRequirements {
   recipient: string;
   network: string;
   account: Account;
+  /** True when the endpoint advertised `extra.sponsored` — the relay pays the STX fee. */
+  sponsored: boolean;
 }
 
 /**
@@ -709,11 +713,11 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
 
       // Cumulative spending limit (sats ledger) — bounds a drain-by-loop of
       // sub-cap L402 invoices. Keyed by the wallet's Stacks address so all sats
-      // spends (BTC L1, sBTC, L402) share one ledger.
-      const l402Addr = getWalletManager().getActiveAccount()?.address;
-      if (l402Addr) {
-        await getSpendLimiter().check("sats", BigInt(amountSats), l402Addr);
-      }
+      // spends (BTC L1, sBTC, L402) share one ledger, or the __lightning__
+      // bucket when the STX wallet is locked (as lightning_pay_invoice does).
+      // Kept even if the payment throws: that does not prove it did not route.
+      const l402Addr = getWalletManager().getActiveAccount()?.address ?? "__lightning__";
+      await getSpendLimiter().reserve([{ unit: "sats", amount: BigInt(amountSats) }], l402Addr);
 
       // Pay the Lightning invoice.
       let payment: { preimage: string; feesPaid: number };
@@ -725,10 +729,6 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
             `L402 payment failed: ${payErr instanceof Error ? payErr.message : String(payErr)}`
           )
         );
-      }
-
-      if (l402Addr) {
-        await getSpendLimiter().record("sats", BigInt(amountSats), l402Addr);
       }
 
       cacheL402Auth(
@@ -839,6 +839,9 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
         return Promise.reject(error);
       }
 
+      // Booked before signing; given back if the payment fails before the
+      // signed transaction is handed to the endpoint.
+      let reservation: SpendReservation | undefined;
       try {
         // Decode payment requirements from header
         const headerValue = error.response?.headers?.[X402_HEADERS.PAYMENT_REQUIRED];
@@ -891,10 +894,9 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
           );
         }
 
-        // Cumulative spending limit: the per-payment cap above bounds a single
-        // 402, but a malicious endpoint can loop sub-cap payments. This blocks
-        // once the session/day total would be exceeded.
-        await getSpendLimiter().check(isSbtc ? "sats" : "ustx", amount, acct.address);
+        // The endpoint offers gas sponsorship: sign with `sponsored: true, fee: 0`
+        // and its relay co-signs and pays the STX fee at settlement.
+        const sponsored = selectedOption.extra?.sponsored === true;
 
         // Invoke pre-payment callback (e.g. balance check) before signing/broadcasting.
         // If the callback throws, the payment is aborted and the error propagates to the caller.
@@ -905,15 +907,35 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
             recipient: selectedOption.payTo,
             network: paymentNetwork ?? acct.network,
             account: acct,
+            sponsored,
           });
         }
 
-        // Build a non-sponsored signed transaction: the sender pays its own
-        // STX gas (fee + nonce auto-estimated by @stacks), and the x402
-        // facilitator simply verifies and broadcasts it. No relay sponsorship
-        // — this is the same tx shape the x402-stacks lib produces, and the
-        // balance check in onBeforePayment already accounts for the gas.
+        // Clamped fee — do NOT let @stacks auto-estimate, since Hiro's
+        // contract_call tiers are polluted by outliers (observed >2000 STX).
+        // The sbtc_transfer clamp caps it at 0.003 STX.
+        const fee = sponsored
+          ? 0n
+          : await resolveDefaultFee(acct.network, isSbtc ? "sbtc_transfer" : "token_transfer");
+
+        // Cumulative spending limit: the per-payment cap above bounds a single
+        // 402, but a malicious endpoint can loop sub-cap payments. This blocks
+        // once the session/day total would be exceeded. A self-paying sender
+        // pays the fee, so it is booked in ustx alongside the amount.
+        reservation = await getSpendLimiter().reserve(
+          [
+            { unit: isSbtc ? "sats" : "ustx", amount },
+            ...(sponsored ? [] : [{ unit: "ustx" as const, amount: fee }]),
+          ],
+          acct.address
+        );
+
+        // Build the signed transaction. Self-paid: the sender pays its own STX
+        // gas and the facilitator verifies and broadcasts it. Sponsored: the
+        // sponsor slot is left empty for the endpoint's relay to fill.
         const networkName = getStacksNetwork(acct.network);
+
+        const memo = paymentIdMemo(selectedOption.extra);
 
         let transaction;
         if (tokenType === "sBTC") {
@@ -930,7 +952,7 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
               uintCV(amount),
               principalCV(acct.address),
               principalCV(selectedOption.payTo),
-              noneCV(),
+              memo ? someCV(bufferCVFromString(memo)) : noneCV(),
             ],
             senderKey: acct.privateKey,
             network: networkName,
@@ -942,10 +964,8 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
                 .willSendEq(amount)
                 .ft(contracts.SBTC_TOKEN as `${string}.${string}`, "sbtc-token"),
             ],
-            // Clamped medium fee — do NOT let @stacks auto-estimate, since
-            // Hiro's contract_call high_priority tier is polluted by outliers
-            // (observed >2000 STX). resolveDefaultFee caps it at 0.05 STX.
-            fee: await resolveDefaultFee(acct.network, "contract_call"),
+            fee,
+            sponsored,
           });
         } else {
           transaction = await makeSTXTokenTransfer({
@@ -953,8 +973,9 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
             amount,
             senderKey: acct.privateKey,
             network: networkName,
-            memo: "",
-            fee: await resolveDefaultFee(acct.network, "token_transfer"),
+            memo: memo ?? "",
+            fee,
+            sponsored,
           });
         }
 
@@ -979,9 +1000,9 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
           compatShimUsed: false,
         });
 
-        // Record the spend against the cumulative ledger now that the signed
-        // payment tx is submitted to the facilitator.
-        await getSpendLimiter().record(isSbtc ? "sats" : "ustx", amount, acct.address);
+        // The signed payment tx is handed to the facilitator from here on, so
+        // the booked spend stands.
+        reservation = undefined;
 
         // Retry the original request with the payment header
         const originalRequest = error.config;
@@ -990,6 +1011,7 @@ export async function createApiClient(baseUrl?: string, options?: CreateApiClien
 
         return axiosInstance.request(originalRequest);
       } catch (paymentError) {
+        if (reservation) await getSpendLimiter().release(reservation);
         return Promise.reject(
           new Error(
             `x402 payment failed: ${paymentError instanceof Error ? paymentError.message : String(paymentError)}`
@@ -1102,6 +1124,27 @@ export function detectTokenType(asset: string): PaymentTokenType {
     return 'STX';
   }
   return 'unsupported';
+}
+
+const STACKS_MEMO_MAX_BYTES = 34;
+
+/**
+ * Memo for an x402 payment from the server's `extra.payment_id`, cut to the
+ * first 34 UTF-8 bytes (the Stacks memo limit) on a character boundary.
+ * Gateways that bind payments on the memo match that prefix.
+ */
+export function paymentIdMemo(extra?: Record<string, unknown>): string | undefined {
+  const id = extra?.payment_id;
+  if (typeof id !== "string" || id.length === 0) return undefined;
+  let memo = "";
+  let bytes = 0;
+  for (const ch of id) {
+    const size = Buffer.byteLength(ch, "utf8");
+    if (bytes + size > STACKS_MEMO_MAX_BYTES) break;
+    memo += ch;
+    bytes += size;
+  }
+  return memo;
 }
 
 /**
@@ -1441,7 +1484,7 @@ export async function checkSufficientBalance(
       const stxBalanceForSbtc = BigInt(stxInfoForSbtc.balance);
       // Same clamped fee the interceptor actually sets on the sBTC contract
       // call — so this check is exact, not a high-priority over-estimate.
-      const estimatedSbtcFee = await resolveDefaultFee(account.network, "contract_call");
+      const estimatedSbtcFee = await resolveDefaultFee(account.network, "sbtc_transfer");
 
       if (stxBalanceForSbtc < estimatedSbtcFee) {
         const stxShortfall = estimatedSbtcFee - stxBalanceForSbtc;
