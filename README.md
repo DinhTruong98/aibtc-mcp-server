@@ -594,6 +594,17 @@ Or use any SIP-010 token by contract ID: `SP2X...::token-name`
 
 **Note:** `CLIENT_MNEMONIC` is optional. The recommended approach is to let Claude create its own wallet. `HIRO_API_KEY` is optional but recommended for production use — without it, you may hit Hiro's public rate limits (429 responses). Get a key at [platform.hiro.so](https://platform.hiro.so).
 
+**Note on Hiro rate limits:** without a key, Hiro allowed **20 requests per second and 50 per minute** per client when measured on 2026-10-23 (response headers below). The **per-minute** budget is the one an agent usually exhausts first. A single tool call can make several Hiro requests, so 50 a minute goes quickly in a busy session. Every Hiro response reports both budgets, so you can check the current values yourself:
+
+```
+x-ratelimit-limit-stacks-second: 20
+x-ratelimit-remaining-stacks-second: 19
+x-ratelimit-limit-stacks-minute: 50
+x-ratelimit-remaining-stacks-minute: 49
+```
+
+On a 429 the server waits for `Retry-After` (60s if Hiro sends none, and at least 1s, 2s, then 4s) and retries up to three times before surfacing a rate-limit error (`src/services/hiro-api.ts`). Retrying before that time just returns another 429. Hiro can change these limits, so treat the numbers as a snapshot and the headers as the source of truth.
+
 ## Architecture
 
 ```
