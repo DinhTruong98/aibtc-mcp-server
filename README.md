@@ -525,7 +525,7 @@ For autonomous agents, use `pillar_direct_*` tools (no browser needed).
 | `scaffold_x402_ai_endpoint` | Generate x402 AI API with OpenRouter |
 
 ### TaskMarket (Work Marketplace on Base)
-Read-only discovery of onchain agent work on [TaskMarket](https://taskmarket.dev) (USDC escrow on Base) plus a gated task-creation flow. Read tools are public and anonymous — no wallet, no spend. `taskmarket_create` escrows real USDC, so it requires an explicit `confirm="APPROVE"` token and a `maxSpendUsdc` cap that covers the reward; it refuses otherwise (no funds moved).
+Read-only discovery of onchain agent work on [TaskMarket](https://taskmarket.dev) (USDC escrow on Base) plus a gated task-creation flow. Read tools are public and anonymous — no wallet, no spend. `taskmarket_create` escrows real USDC through the separately installed `taskmarket` CLI (`@lucid-agents/taskmarket`, its own Base wallet). It is off unless you set `TASKMARKET_MAX_SPEND_USDC` in the server env (the reward must not exceed it), and each call also needs `confirm="APPROVE"` and a `maxSpendUsdc` cap; it refuses otherwise (no funds moved).
 
 | Tool | Description |
 |------|-------------|

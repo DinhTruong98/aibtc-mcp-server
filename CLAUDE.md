@@ -144,6 +144,7 @@ The server never reads a `.env` file: it would load the `.env` of whatever proje
 - `SPEND_LIMIT_DAILY_USTX` / `SPEND_LIMIT_SESSION_USTX` - STX spend cap per day / per unlock in micro-STX (default: 50000000 = 50 STX)
 - `SPEND_LIMIT_DAILY_SATS` / `SPEND_LIMIT_SESSION_SATS` - BTC spend cap per day / per unlock in sats (default: 50000)
 - `AIBTC_ALLOW_BLIND_SIGN` - `true` lets `schnorr_sign_digest` sign raw digests (off by default: a signed sighash spends outside the limit)
+- `TASKMARKET_MAX_SPEND_USDC` - Per-task USDC ceiling for `taskmarket_create`; unset or 0 disables it (USDC on Base has no spend-limiter ledger)
 
 ### Spending Limit
 
@@ -222,7 +223,7 @@ The allowlist is re-enforced at `tools/call` time, so the model can't reach a to
 | Discovery | `list_x402_endpoints` | Start here to find x402 actions |
 | Earning | `earning_opportunities` | Static "how to put your assets to work" menu; surface after `identity_register` |
 | Bounties | `bounty_list/get/submissions` (read) + `bounty_submit/create/accept/paid/cancel` (BIP-322 auth) + `bounty_my_posted/my_submissions` | aibtc.com sBTC bounty board; most direct way to earn. Submit needs Registered (L1+); create needs Genesis (L2+); bc1q/P2WPKH signing; accepted submission paid in sBTC |
-| TaskMarket | `taskmarket_search/get/submissions/stats` (read, public) + `taskmarket_preview_create` + `taskmarket_create` (gated) | Onchain agent work marketplace on Base (USDC escrow). Read tools are anonymous and free. `taskmarket_create` requires explicit `confirm="APPROVE"` + `maxSpendUsdc` cap, pins Base network, refuses otherwise, and never blindly retries unknown-settlement payments. See `docs/TOOLS.md` |
+| TaskMarket | `taskmarket_search/get/submissions/stats` (read, public) + `taskmarket_preview_create` + `taskmarket_create` (gated) | Onchain agent work marketplace on Base (USDC escrow). Read tools are anonymous and free. `taskmarket_create` is off unless `TASKMARKET_MAX_SPEND_USDC` is set, shells out to the separately installed `taskmarket` CLI (own EVM wallet, not spend-metered), also requires `confirm="APPROVE"` + `maxSpendUsdc`, pins `--network base`, refuses otherwise, and never blindly retries unknown-settlement payments. See `docs/TOOLS.md` |
 | Wallet & balance | `get_wallet_info`, `get_stx_balance` | |
 | Wallet mgmt | `wallet_create/import/unlock/lock/list/switch/delete/export/status` | On mainnet, create/import also derive a Spark Lightning wallet from the same mnemonic |
 | Bitcoin L1 | `get_btc_balance/fees/utxos`, `transfer_btc` | mempool.space; P2WPKH; sats |

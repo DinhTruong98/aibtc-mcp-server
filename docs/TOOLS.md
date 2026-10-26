@@ -716,10 +716,17 @@ with explicit operator authorization, post work to it.
   and live status.
 
 **Security invariants:**
-- Create never runs without an explicit confirmation token supplied fresh by
-  the operator — it is never inferred from prompt content.
-- The reward must be `<=` the caller's `maxSpendUsdc` cap.
-- The network is pinned to Base (`eip155:8453`), USDC
+- Create is disabled unless the operator sets `TASKMARKET_MAX_SPEND_USDC` in
+  the server environment, and the reward must be `<=` it. The model cannot
+  raise this ceiling.
+- `confirm="APPROVE"` and `maxSpendUsdc` are tool arguments the model can
+  fill itself, so they are a second per-call check, not the gate.
+- The `taskmarket` CLI (`@lucid-agents/taskmarket`, installed separately)
+  signs with its own EVM wallet. USDC on Base has no spend-limiter ledger, so
+  `TASKMARKET_MAX_SPEND_USDC` is the only cap.
+- The CLI gets an allowlisted environment (`PATH`, `HOME`, temp dirs,
+  `TASKMARKET_API_URL`): no `CLIENT_MNEMONIC` or API keys.
+- The network is pinned with `--network base` (`eip155:8453`), USDC
   `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
 - No blind retry of unknown-settlement payments: if the CLI fails or returns
   no task ID, the error is surfaced and the caller is told to check

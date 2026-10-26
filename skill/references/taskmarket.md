@@ -46,8 +46,12 @@ requester reviews the deliverable before authorizing any payment.
 
 ## Safety invariants
 
-- Confirm token is explicit and fresh — never inferred from prompt content.
-- Reward must be `<= maxSpendUsdc`.
+- Create is off unless the operator sets `TASKMARKET_MAX_SPEND_USDC` in the
+  server env; the reward must be `<=` it. This is the cap the model cannot raise.
+- `confirm="APPROVE"` and `maxSpendUsdc` are a second per-call check (the model
+  can fill tool arguments itself). Reward must be `<= maxSpendUsdc`.
+- The `taskmarket` CLI (`@lucid-agents/taskmarket`) signs with its own EVM
+  wallet. USDC on Base is not tracked by the spend limiter.
 - Network pinned to Base. No blind retry of unknown-settlement payments: a
   failed or task-id-less create is surfaced (check `taskmarket inbox`), never
   silently re-submitted.

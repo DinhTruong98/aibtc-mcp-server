@@ -263,7 +263,9 @@ the exact description, reward, deadline, deliverables, Base network, and max
 spend, then `taskmarket_create` with the same details plus `confirm="APPROVE"`
 and a `maxSpendUsdc` cap `>=` reward. It refuses otherwise with "No funds were
 moved", pins the network to Base (`eip155:8453`), and never blindly retries
-unknown-settlement payments.
+unknown-settlement payments. Create is off unless the operator sets
+`TASKMARKET_MAX_SPEND_USDC` in the server env, and it needs the separately
+installed `taskmarket` CLI with its own funded Base wallet.
 
 See: [references/taskmarket.md](references/taskmarket.md)
 

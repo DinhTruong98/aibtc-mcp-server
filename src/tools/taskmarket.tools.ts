@@ -17,9 +17,13 @@
  *                               and fund the task, then return the task ID, link, and live status.
  *
  * SECURITY:
- * - Create NEVER runs without an explicit confirmation token supplied fresh by the operator.
- * - The reward must be <= the caller's max-spend cap; otherwise the create refuses.
- * - The network is pinned to Base (eip155:8453). No blind retry of unknown-settlement payments:
+ * - Create is disabled unless the operator sets TASKMARKET_MAX_SPEND_USDC in the server
+ *   environment, and the reward must be <= it. This is the cap the model cannot raise.
+ * - Per call it also needs confirm="APPROVE" and reward <= maxSpendUsdc. Both are tool
+ *   arguments the model can fill itself, so they are a second check, not the gate.
+ * - The CLI signs with its own EVM wallet. USDC on Base has no spend-limiter ledger.
+ * - The CLI gets an allowlisted environment (no CLIENT_MNEMONIC or API keys).
+ * - The network is pinned with `--network base` (eip155:8453). No blind retry of unknown-settlement payments:
  *   if the CLI reports a task ID it is re-fetched for live status; if the create fails, the error
  *   is surfaced and the caller is told to check `taskmarket inbox` — never silently re-submitted.
  * - No private keys, seeds, tokens, or cookies are ever requested, stored, or logged here.
@@ -38,6 +42,7 @@ import {
   listTasks,
   prepareCreatePlan,
   type CreateTaskRequest,
+  type GatedCreateResult,
 } from "../services/taskmarket.service.js";
 
 const execFileAsync = promisify(execFile);
@@ -47,6 +52,58 @@ const TASKMARKET_CLI = process.env.TASKMARKET_CLI || "taskmarket";
 
 /** Bound the CLI create so a hung call cannot block the tool forever. */
 const CLI_TIMEOUT_MS = 120_000;
+
+/**
+ * Environment passed to the CLI. An allowlist, so this server's secrets
+ * (CLIENT_MNEMONIC, API keys, credential-store passwords) never reach the
+ * child process. TASKMARKET_NETWORK is left out: the network comes from the
+ * `--network base` flag.
+ */
+const CLI_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "SystemRoot",
+  "PATHEXT",
+  "LANG",
+  "TASKMARKET_API_URL",
+] as const;
+
+function cliEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of CLI_ENV_ALLOWLIST) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return env;
+}
+
+/** `taskmarket --network base task create ...` for a granted plan. */
+function buildCreateCliArgs(plan: NonNullable<GatedCreateResult["plan"]>): string[] {
+  const args = [
+    "--network",
+    "base",
+    "task",
+    "create",
+    "--description",
+    plan.description,
+    "--reward",
+    plan.rewardUsdc,
+    "--duration",
+    String(plan.durationHours),
+  ];
+  if (plan.tags.length > 0) args.push("--tags", plan.tags.join(","));
+  args.push("--submission-visibility", plan.submissionVisibility);
+  return args;
+}
+
+function errorJson(body: Record<string, unknown>) {
+  return { ...createJsonResponse(body), isError: true as const };
+}
 
 const TASK_ID_SCHEMA = z
   .string()
@@ -257,20 +314,9 @@ export function registerTaskmarketTools(server: McpServer): void {
           maxSpendUsdc: args.maxSpendUsdc as string,
         });
         if (!plan.granted) {
-          return createJsonResponse({ success: false, granted: false, reason: plan.reason });
+          return errorJson({ success: false, granted: false, reason: plan.reason });
         }
-        const cliArgs = [
-          "task",
-          "create",
-          "--description",
-          plan.plan!.description,
-          "--reward",
-          plan.plan!.rewardUsdc,
-          "--duration",
-          String(plan.plan!.durationHours),
-        ];
-        if (plan.plan!.tags.length > 0) cliArgs.push("--tags", plan.plan!.tags.join(","));
-        cliArgs.push("--submission-visibility", plan.plan!.submissionVisibility);
+        const cliArgs = buildCreateCliArgs(plan.plan!);
         return createJsonResponse({
           success: true,
           granted: true,
@@ -289,6 +335,9 @@ export function registerTaskmarketTools(server: McpServer): void {
     {
       description:
         "Create and FUND a TaskMarket task on Base after explicit operator authorization. " +
+        "Disabled unless the operator has set TASKMARKET_MAX_SPEND_USDC in the server environment; " +
+        "the reward must not exceed it. Requires the separately installed `taskmarket` CLI " +
+        "(@lucid-agents/taskmarket) with its own funded Base wallet. " +
         "Show the user the plan first with taskmarket_preview_create, then run this tool with the " +
         "SAME details plus confirm='APPROVE' and a maxSpendUsdc cap >= reward. The task is created " +
         "through the first-party TaskMarket CLI (which escrows the reward in USDC on Base via x402). " +
@@ -320,35 +369,23 @@ export function registerTaskmarketTools(server: McpServer): void {
           maxSpendUsdc: args.maxSpendUsdc as string,
         });
         if (!plan.granted) {
-          return createJsonResponse({ success: false, granted: false, reason: plan.reason });
+          return errorJson({ success: false, granted: false, reason: plan.reason });
         }
         const p = plan.plan!;
-
-        const cliArgs = [
-          "task",
-          "create",
-          "--description",
-          p.description,
-          "--reward",
-          p.rewardUsdc,
-          "--duration",
-          String(p.durationHours),
-        ];
-        if (p.tags.length > 0) cliArgs.push("--tags", p.tags.join(","));
-        cliArgs.push("--submission-visibility", p.submissionVisibility);
+        const cliArgs = buildCreateCliArgs(p);
 
         let stdout: string;
         try {
           const result = await execFileAsync(TASKMARKET_CLI, cliArgs, {
             timeout: CLI_TIMEOUT_MS,
             maxBuffer: 1024 * 1024,
-            env: { ...process.env },
+            env: cliEnv(),
           });
           stdout = result.stdout;
         } catch (err) {
           const e = err as { stdout?: string; stderr?: string; message?: string };
           const detail = (e.stdout || e.stderr || e.message || "unknown").toString().slice(0, 800);
-          return createJsonResponse({
+          return errorJson({
             success: false,
             granted: true,
             note: "Create command failed. The settlement status is UNKNOWN — this was NOT blindly retried. Check `taskmarket inbox` / the CLI output below before deciding whether to retry.",
@@ -364,7 +401,7 @@ export function registerTaskmarketTools(server: McpServer): void {
           taskId = null;
         }
         if (!taskId) {
-          return createJsonResponse({
+          return errorJson({
             success: false,
             granted: true,
             note: "Create did not return a task ID. Settlement status is UNKNOWN and was NOT retried. Inspect the CLI output and check `taskmarket inbox`.",
@@ -373,7 +410,9 @@ export function registerTaskmarketTools(server: McpServer): void {
         }
 
         // Fetch live status for the freshly created task (read-only).
+        // The task already exists here, so a failed status read must not hide the taskId.
         let live: { status?: string; phase?: string; deadline?: string } | null = null;
+        let liveStatusError: string | null = null;
         try {
           const task = await getTask(taskId);
           live = {
@@ -381,8 +420,8 @@ export function registerTaskmarketTools(server: McpServer): void {
             phase: task.phase,
             deadline: task.expiryTime,
           };
-        } catch {
-          live = null;
+        } catch (err) {
+          liveStatusError = err instanceof Error ? err.message : String(err);
         }
 
         return createJsonResponse({
@@ -394,7 +433,8 @@ export function registerTaskmarketTools(server: McpServer): void {
           asset: p.asset,
           rewardUsdc: p.rewardUsdc,
           deadlineIso: p.deadlineIso,
-          liveStatus: live ?? "pending confirmation — re-run taskmarket_get to poll",
+          liveStatus: live,
+          liveStatusError,
           note: "Submissions must be reviewed by a human. Use taskmarket_submissions to list them; this tool never auto-accepts work.",
         });
       } catch (error) {

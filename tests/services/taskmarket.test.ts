@@ -3,7 +3,7 @@
  * the gated create-plan logic. No network access, no wallet, no real spend.
  */
 
-import { describe, expect, it, vi, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import {
   baseUnitsToUsdc,
   usdcToBaseUnits,
@@ -17,8 +17,13 @@ import {
   TASKMARKET_USDC_ASSET,
 } from "../../src/services/taskmarket.service.js";
 
+beforeEach(() => {
+  vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "5");
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("usdc unit conversion", () => {
@@ -88,6 +93,28 @@ describe("prepareCreatePlan — the create gate", () => {
     expect(result.granted).toBe(false);
     expect(result.reason).toContain("exceeds max-spend");
     expect(result.reason).toContain("No funds were moved");
+  });
+
+  it("REFUSES when the operator has not set TASKMARKET_MAX_SPEND_USDC", () => {
+    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "");
+    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "5" });
+    expect(result.granted).toBe(false);
+    expect(result.reason).toContain("TASKMARKET_MAX_SPEND_USDC");
+    expect(result.reason).toContain("No funds were moved");
+  });
+
+  it("REFUSES when TASKMARKET_MAX_SPEND_USDC is 0", () => {
+    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "0");
+    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "5" });
+    expect(result.granted).toBe(false);
+    expect(result.reason).toContain("disabled");
+  });
+
+  it("REFUSES a reward over the operator ceiling even when the caller's cap allows it", () => {
+    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "1");
+    const result = prepareCreatePlan(base, { confirm: "APPROVE", maxSpendUsdc: "100" });
+    expect(result.granted).toBe(false);
+    expect(result.reason).toContain("operator ceiling");
   });
 
   it("REFUSES a zero reward", () => {

@@ -7,11 +7,11 @@
  * API (read-only tools: search, get, list-submissions, market-stats) and a
  * single gated write path (create-task).
  *
- * The create path is an x402-paid POST /api/tasks on Base. We never pay it
- * silently. Creating a task escrows real USDC, so the caller MUST pass an
- * explicit confirmation token and a hard max-spend cap, and the network must
- * be Base. See the `createTask` guard in this file and the tool wrapper in
- * src/tools/taskmarket.tools.ts.
+ * Creating a task escrows real USDC on Base through the first-party
+ * `taskmarket` CLI, which signs with its own EVM wallet (not this server's).
+ * It is disabled unless the operator sets TASKMARKET_MAX_SPEND_USDC, and each
+ * call also needs confirm="APPROVE" and a maxSpendUsdc cap. USDC on Base has
+ * no ledger in the spend limiter, so the env ceiling is the only cap.
  *
  * SECURITY INVARIANT: this file never holds a private key, seed phrase, token,
  * or cookie. Read-only endpoints are anonymous. The create path relies on the
@@ -30,14 +30,39 @@ export const TASKMARKET_NETWORK = "eip155:8453";
 export const TASKMARKET_USDC_ASSET =
   "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
-/** Default production create-task payment policy (pinned to TaskMarket's escrow). */
-export const TASKMARKET_PAYMENT_POLICY = {
-  resource: `${TASKMARKET_API_URL}/api/tasks`,
-  method: "POST",
-  network: TASKMARKET_NETWORK,
-  asset: TASKMARKET_USDC_ASSET,
-  maxTimeoutSeconds: 300,
-} as const;
+/** Bound every read so a hung TaskMarket API cannot hold a tool call open. */
+const READ_TIMEOUT_MS = 15_000;
+
+/**
+ * Operator spend ceiling for taskmarket_create, in base units, read from
+ * TASKMARKET_MAX_SPEND_USDC. Returns null when unset or 0, which disables
+ * create. It comes from the server environment, not from tool arguments, so
+ * the calling model cannot raise it.
+ */
+export function readOperatorMaxSpend(): bigint | null {
+  const raw = process.env.TASKMARKET_MAX_SPEND_USDC?.trim();
+  if (!raw) return null;
+  const cap = BigInt(usdcToBaseUnits(raw));
+  return cap > 0n ? cap : null;
+}
+
+/** Refusal reason when the operator ceiling blocks this reward, else null. */
+export function operatorCapRefusal(rewardBaseUnits: bigint): string | null {
+  const cap = readOperatorMaxSpend();
+  if (cap === null) {
+    return (
+      "Create refused: TaskMarket create is disabled. The operator must set " +
+      "TASKMARKET_MAX_SPEND_USDC in the server environment to enable it. No funds were moved."
+    );
+  }
+  if (rewardBaseUnits > cap) {
+    return (
+      `Create refused: reward ${baseUnitsToUsdc(rewardBaseUnits.toString())} USDC exceeds the operator ` +
+      `ceiling TASKMARKET_MAX_SPEND_USDC=${baseUnitsToUsdc(cap.toString())}. No funds were moved.`
+    );
+  }
+  return null;
+}
 
 export interface TaskmarketTask {
   id: string;
@@ -116,7 +141,7 @@ export function parseMaxSpend(raw: string, baseUnits = false): bigint {
 
 async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${TASKMARKET_API_URL}${path}`, {
-    signal,
+    signal: signal ?? AbortSignal.timeout(READ_TIMEOUT_MS),
     headers: { accept: "application/json" },
   });
   if (!response.ok) {
@@ -145,8 +170,8 @@ export async function listTasks(options: {
   if (options.phase) params.set("phase", options.phase);
   if (options.mode) params.set("mode", options.mode);
   if (options.tags) params.set("tags", options.tags);
-  if (options.rewardMin) params.set("minReward", String(Math.round(Number(options.rewardMin) * 1e6)));
-  if (options.rewardMax) params.set("maxReward", String(Math.round(Number(options.rewardMax) * 1e6)));
+  if (options.rewardMin) params.set("minReward", usdcToBaseUnits(options.rewardMin));
+  if (options.rewardMax) params.set("maxReward", usdcToBaseUnits(options.rewardMax));
   params.set("limit", String(options.limit ?? 20));
   const result = await apiGet<{
     tasks: TaskmarketTask[];
@@ -242,9 +267,11 @@ export interface GatedCreateResult {
  *  - the reward exceeds the caller's max-spend cap;
  *  - any field is malformed.
  *
- * This is the sole gate between an LLM request and the first-party TaskMarket
- * create flow. The confirmation token must be supplied fresh by the operator
- * for each call — it is never inferred from prompt content.
+ *  - the operator ceiling TASKMARKET_MAX_SPEND_USDC is unset or below the reward.
+ *
+ * `confirm` and `maxSpendUsdc` are tool arguments, so the calling model can
+ * supply them itself; they are a per-call check only. The ceiling the model
+ * cannot raise is the environment variable (see operatorCapRefusal).
  */
 export function prepareCreatePlan(
   request: CreateTaskRequest,
@@ -303,6 +330,11 @@ export function prepareCreatePlan(
   const durationHours = Number(request.durationHours);
   if (!Number.isFinite(durationHours) || durationHours <= 0) {
     return { granted: false, reason: "Create refused: durationHours must be a positive number." };
+  }
+
+  const operatorRefusal = operatorCapRefusal(rewardBaseUnits);
+  if (operatorRefusal) {
+    return { granted: false, reason: operatorRefusal };
   }
 
   const tags = (request.tags ?? []).map((t) => t.trim()).filter(Boolean);

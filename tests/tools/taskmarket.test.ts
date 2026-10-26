@@ -4,7 +4,7 @@
  * gated create path.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the first-party CLI binary so the create path is hermetic.
 vi.mock("child_process", async (importOriginal) => {
@@ -60,7 +60,12 @@ describe("taskmarket tools", () => {
   let server: ReturnType<typeof createTrackingServer>["server"];
   let tools: ReturnType<typeof createTrackingServer>["tools"];
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   beforeEach(() => {
+    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "5");
     mockExecFile.mockReset();
     const tracking = createTrackingServer();
     server = tracking.server;
@@ -231,8 +236,68 @@ describe("taskmarket tools", () => {
     expect(body.liveStatus.status).toBe("open");
     expect(mockExecFile).toHaveBeenCalledTimes(1);
     const cliArgs = mockExecFile.mock.calls[0][1] as string[];
-    expect(cliArgs[0]).toBe("task");
-    expect(cliArgs[1]).toBe("create");
+    expect(cliArgs.slice(0, 4)).toEqual(["--network", "base", "task", "create"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("taskmarket_create passes the CLI an allowlisted env without server secrets", async () => {
+    vi.stubEnv("CLIENT_MNEMONIC", "abandon abandon abandon");
+    vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
+    vi.stubEnv("TASKMARKET_NETWORK", "base-sepolia");
+    mockExecFile.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, res: { stdout: string; stderr: string }) => void) => {
+        cb(null, { stdout: JSON.stringify({ ok: true }), stderr: "" });
+      }
+    );
+    await tools.get("taskmarket_create")!.handler({
+      description: "Write a short research brief on Base USDC adoption for AI agents.",
+      rewardUsdc: "2",
+      durationHours: 24,
+      confirm: "APPROVE",
+      maxSpendUsdc: "5",
+    });
+    const opts = mockExecFile.mock.calls[0][2] as { env: Record<string, string | undefined> };
+    expect(opts.env.CLIENT_MNEMONIC).toBeUndefined();
+    expect(opts.env.OPENROUTER_API_KEY).toBeUndefined();
+    expect(opts.env.TASKMARKET_MAX_SPEND_USDC).toBeUndefined();
+    expect(opts.env.TASKMARKET_NETWORK).toBeUndefined();
+    expect(opts.env.PATH).toBe(process.env.PATH);
+  });
+
+  it("taskmarket_create REFUSES (no CLI call) when the operator ceiling is unset, even with confirm + cap", async () => {
+    vi.stubEnv("TASKMARKET_MAX_SPEND_USDC", "");
+    const res = await tools.get("taskmarket_create")!.handler({
+      description: "Write a short research brief on Base USDC adoption for AI agents.",
+      rewardUsdc: "2",
+      durationHours: 24,
+      confirm: "APPROVE",
+      maxSpendUsdc: "2",
+    });
+    const body = parseResult(res) as { granted: boolean; reason: string };
+    expect(res.isError).toBe(true);
+    expect(body.granted).toBe(false);
+    expect(body.reason).toContain("TASKMARKET_MAX_SPEND_USDC");
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it("taskmarket_create returns the taskId and the status error when the post-create read fails", async () => {
+    mockExecFile.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, res: { stdout: string; stderr: string }) => void) => {
+        cb(null, { stdout: JSON.stringify({ ok: true, data: { taskId: VALID_TASK_ID } }), stderr: "" });
+      }
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "boom" }, { status: 503 })));
+    const res = await tools.get("taskmarket_create")!.handler({
+      description: "Write a short research brief on Base USDC adoption for AI agents.",
+      rewardUsdc: "2",
+      durationHours: 24,
+      confirm: "APPROVE",
+      maxSpendUsdc: "5",
+    });
+    const body = parseResult(res) as { taskId: string; liveStatus: unknown; liveStatusError: string };
+    expect(body.taskId).toBe(VALID_TASK_ID);
+    expect(body.liveStatus).toBeNull();
+    expect(body.liveStatusError).toContain("503");
     vi.unstubAllGlobals();
   });
 
